@@ -1,6 +1,6 @@
 # standard imports
 import os
-from typing import Dict
+from typing import List
 
 # third-party imports
 from fastapi import UploadFile
@@ -9,62 +9,77 @@ from langchain_huggingface import HuggingFaceEndpoint
 from langchain_core.prompts import ChatPromptTemplate
 
 # local imports
-from utils.constants import ACCESS_TOKEN, MODEL_NAME
 from utils.prompts import CONTEXT_AND_QUESTIONS_PROMPT
 from utils.text_extractor import TextExtractor
+from utils.text_cleaner import TextCleaner
+from schemas.schemas import AnswerSchema, AnswerResponse
 
 
-async def generate_answers(questions: list, document_text: str) -> Dict:
-    """
-        Input:
-        -> questions: List => The list of questions that we want answer for
-        -> document_text: str => The text extracted from the PDF or JSON
+class QAndAProcessor:
+    async def generate_answers(questions: list, document_text: str) -> List[AnswerSchema]:
+        """
+            Generate answers for a list of questions based on document text.
 
-        This function talks with hugging face hosted models
-        and reverts back with the answer from the given context.
+            Args:
+            - questions: List of questions.
+            - document_text: The text extracted from the document.
 
-        Return's: Dict of questions and answers.
-    """
+            Returns:
+            - Dictionary mapping questions to their answers.
+        """
 
-    # creating LLM object
-    repo_id = os.environ.get('MODEL_NAME')
-    token = os.environ.get('HUGGINGFACE_API_KEY')
+        # creating LLM object
+        repo_id = os.environ.get('MODEL_NAME')
+        token = os.environ.get('HUGGINGFACE_API_KEY')
 
-    llm = HuggingFaceEndpoint(
-        repo_id=repo_id,
-        temperature=0.7,
-        huggingfacehub_api_token=token,
-        max_new_tokens=512
-    )
+        if not repo_id or not token:
+            raise ValueError("Missing environment variables")
 
-    # creating prompt
-    prompt = ChatPromptTemplate.from_template(
-        CONTEXT_AND_QUESTIONS_PROMPT
-    )
-
-    # getting answers from the questions
-    question_and_answers = {}
-    for question in questions:
-
-        llm_chain = prompt | llm | StrOutputParser()
-        answer = llm_chain.invoke(
-            {"context": document_text, "question": question}
+        llm = HuggingFaceEndpoint(
+            repo_id=repo_id,
+            temperature=0.7,
+            huggingfacehub_api_token=token,
+            max_new_tokens=512
         )
 
-        question_and_answers[question] = answer
+        # creating prompt
+        prompt = ChatPromptTemplate.from_template(
+            CONTEXT_AND_QUESTIONS_PROMPT
+        )
 
-    return question_and_answers
+        llm_chain = prompt | llm | StrOutputParser()
 
+        # getting answers from the questions
+        question_and_answers = []
+        for question in questions:
+            try:
+                answer = llm_chain.invoke(
+                    {"context": document_text, "question": question}
+                )
+                answer = TextCleaner.clean_string(text=answer)
+                question_and_answers.append(AnswerSchema(
+                    question=question, answer=answer))
+            except Exception as ex:
+                print(f"Exception invoking chain for Q:{question} Ex: {ex}")
+                raise ex
+        return question_and_answers
 
-async def process(que_file: UploadFile, ref_doc: UploadFile) -> Dict:
+    async def process(que_file: UploadFile, ref_doc: UploadFile) -> AnswerResponse:
+        """
+            Process the files and generate answers.
 
-    # Extract questions from JSON file
-    questions = await TextExtractor.extract_questions(file=que_file)
+            Args:
+            - que_file: UploadFile containing questions.
+            - ref_doc: UploadFile containing the reference document.
 
-    # Extract text from the document (PDF or JSON)
-    document_text = await TextExtractor.extract_document_text(file=ref_doc)
+            Returns:
+            - Dictionary of questions and their answers.
+        """
 
-    # Process questions and generate answers
-    answers = await generate_answers(questions, document_text)
-
-    return answers
+        try:
+            questions = await TextExtractor.extract_questions(file=que_file)
+            document_text = await TextExtractor.extract_document_text(file=ref_doc)
+            answers = await QAndAProcessor.generate_answers(questions, document_text)
+            return AnswerResponse(answers=answers)
+        except Exception as ex:
+            raise ex
